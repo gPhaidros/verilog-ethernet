@@ -3,4 +3,4 @@
 *.pyc
 *.vvp
 *.kate-swp
-
+.vscode/*

@@ -41,51 +41,266 @@ module mdio_station #(
     input   wire                        clk,
     input   wire                        rst,
     input   wire                        en,
-    output  wire                        err,
+    output  reg                         err,
 
     input   wire [PHY_ADDR_WIDTH-1:0]   phy_addr,
     input   wire [REG_ADDR_WIDTH-1:0]   reg_addr,
     input   wire                        write,
-    // Write interface
+    
     input   wire [DATA_WIDTH-1:0]       up_data,
     input   wire                        up_valid,
-    output  wire                        up_ready,
-    // Read interface
-    input   wire [DATA_WIDTH-1:0]       down_data,
-    output  wire                        down_valid,
-    output  wire                        down_ready,
+    output  reg                         up_ready,
+    
+    output  reg [DATA_WIDTH-1:0]        down_data,
+    output  reg                         down_valid,
+    input   reg                         down_ready,
 
     // MDIO interface
     output  wire                        mdc,
     input   wire                        mdio_i,
     output  wire                        mdio_o,
-    output  wire                        mdio_t,
+    output  wire                        mdio_t
 );
+    reg                      ce;
+
+    reg                      mdio_i_r;
+    reg                      mdio_o_r;
+    reg                      mdio_t_r;
+    reg                      mdio_i_latched;
+    reg                      mdio_o_next;
+    reg                      mdio_t_next;
     
+    reg [PHY_ADDR_WIDTH-1:0] phy_addr_r;
+    reg [REG_ADDR_WIDTH-1:0] reg_addr_r;
+    reg [DATA_WIDTH-1:0]     up_data_r;
+    reg                      write_r;
+
     // Clock generation
     reg [$clog2(ICLK_TO_MDC_FREQ_RATIO):0] mdc_cnt;
 
     always @(posedge clk) begin
         if ( ( ~en ) | 
-             (  rst )
+             (  rst ) |
              (  mdc_cnt == (ICLK_TO_MDC_FREQ_RATIO-1) ) ) begin
             mdc_cnt <= ICLK_TO_MDC_FREQ_RATIO / 2 + 'd1;
-        end else begin
+        end else if ( ce ) begin
             mdc_cnt <= mdc_cnt + 'd1;
         end
     end
 
     assign mdc = ( mdc_cnt > ICLK_TO_MDC_FREQ_RATIO / 2 ) ? 1'b1 : 1'b0;
 
+    // Bit counter
+    reg [6:0] bit_cnt;
+    reg       mdc_prev;
+
+    always @(clk) begin
+        mdc_prev <= mdc;
+    end
+
     // States of state machine
-    localparam IDLE     = 4'b;
-    localparam PREAMBLE = 4'b;
-    localparam START    = 4'b;
-    localparam OPCODE   = 4'b;
-    localparam PHY_ADDR = 4'b;
-    localparam REG_ADDR = 4'b;
-    localparam TA       = 4'b;
-    localparam READ     = 4'b;
-    localparam WRITE    = 4'b;
+    localparam IDLE     = 4'd0;
+    localparam PREAMBLE = 4'd1;
+    localparam START    = 4'd2;
+    localparam OPCODE   = 4'd3;
+    localparam PHY_ADDR = 4'd4;
+    localparam REG_ADDR = 4'd5;
+    localparam TA       = 4'd6;
+    localparam READ     = 4'd7;
+    localparam WRITE    = 4'd8;
+
+    reg [3:0] state;
+
+    always @(posedge clk) begin
+        err <= 'b0;
+        mdio_t_next <= 'b1;
+        mdio_o_next <= 'b1;
+        mdio_i_r    <= 'b1;
+
+        case (state)
+            IDLE: begin
+                if (up_valid && up_ready) begin
+                    phy_addr_r  <= phy_addr;
+                    reg_addr_r  <= reg_addr;
+                    up_data_r   <= up_data;
+                    write_r     <= write;
+
+                    mdio_t_r <= 1'b1;
+
+                    bit_cnt <= 'd0;
+
+                    state <= PREAMBLE;
+                end else begin
+                    state <= IDLE;
+                end
+            end
+            PREAMBLE: begin
+                if (bit_cnt < (PREAMBLE_LENGTH - 1)) begin
+                    mdio_t_next <= 'b0;
+                    mdio_o_next <= 'b1;
+
+                    state <= PREAMBLE;
+                end else begin
+                    state <= START;
+                end
+            end
+            START: begin
+                if (bit_cnt == 'd0) begin
+                    mdio_t_next <= 'b0;
+                    mdio_o_next <= 'b0;
+
+                    state <= START;
+                end else if (bit_cnt == 'd1) begin
+                    mdio_t_next <= 'b0;
+                    mdio_o_next <= 'b1;
+
+                    state <= START;
+                end else begin
+                    mdio_t_next <= 'b0;
+                    mdio_o_next <= 'b1;
+
+                    state <= OPCODE;
+                end
+            end
+            OPCODE: begin
+                if (write_r) begin
+                    if (bit_cnt == 'd0) begin
+                        mdio_t_next <= 'b0;
+                        mdio_o_next <= 'b0;
+
+                        state <= OPCODE;
+                    end else if (bit_cnt == 'd1) begin
+                        mdio_t_next <= 'b0;
+                        mdio_o_next <= 'b1;
+
+                        state <= OPCODE;
+                    end else begin
+                        mdio_t_next <= 'b0;
+                        mdio_o_next <= 'b1;
+
+                        state <= PHY_ADDR;
+                    end
+                end else begin
+                    if (bit_cnt == 'd0) begin
+                        mdio_t_next <= 'b0;
+                        mdio_o_next <= 'b1;
+
+                        state <= OPCODE;
+                    end else if (bit_cnt == 'd1) begin
+                        mdio_t_next <= 'b0;
+                        mdio_o_next <= 'b0;
+
+                        state <= OPCODE;
+                    end else begin
+                        mdio_t_next <= 'b0;
+                        mdio_o_next <= 'b0;
+
+                        state <= PHY_ADDR;
+                    end
+                end
+            end
+            PHY_ADDR: begin
+                if (bit_cnt < PHY_ADDR_WIDTH) begin
+                    mdio_t_next <= 'b0;
+                    mdio_o_next <= phy_addr_r[bit_cnt];
+
+                    state <= PHY_ADDR;
+                end else begin
+                    mdio_t_next <= 'b0;
+                    mdio_o_next <= 'b0;
+
+                    state <= REG_ADDR;
+                end
+            end
+            REG_ADDR: begin
+                if (bit_cnt < REG_ADDR_WIDTH) begin
+                    mdio_t_next <= 'b0;
+                    mdio_o_next <= reg_addr_r[bit_cnt];
+
+                    state <= REG_ADDR;
+                end else begin
+                    mdio_t_next <= 'b0;
+                    mdio_o_next <= 'b0;
+
+                    state <= TA;
+                end
+            end
+            TA: begin
+                if (write_r) begin
+                    if (bit_cnt == 'd0) begin
+                        mdio_t_next <= 'b0;
+                        mdio_o_next <= 'b1;
+
+                        state <= TA;
+                    end else if (bit_cnt == 'd1) begin
+                        mdio_t_next <= 'b0;
+                        mdio_o_next <= 'b0;
+
+                        state <= TA;
+                    end else begin
+                        mdio_t_next <= 'b0;
+                        mdio_o_next <= 'b0;
+
+                        state <= WRITE;
+                    end
+                end else begin
+                    if (bit_cnt == 'd0) begin
+                        mdio_t_next <= 'b1;
+                        mdio_o_next <= 'b1;
+
+                        state <= TA;
+                    end else if (bit_cnt == 'd1) begin
+                        mdio_t_next <= 'b1;
+                        mdio_o_next <= 'b0;
+
+                        if (~mdio_i_r) begin
+                            state <= READ;
+                        end else begin
+                            state <= IDLE;
+                            err   <= 'b1;
+                        end
+
+                        state <= TA;
+                    end
+                end
+            end
+            WRITE: begin
+                if (bit_cnt < DATA_WIDTH) begin
+                    mdio_t_next <= 'b0;
+                    mdio_o_next <= up_data_r[bit_cnt];
+
+                    state <= WRITE;
+                end else begin
+                    state <= IDLE;
+                end
+            end
+            READ: begin
+                if (bit_cnt < DATA_WIDTH) begin
+                    state <= READ;
+                end else begin
+                    state <= IDLE;
+                end
+            end
+        endcase
+    end
+
+    // Posedge MDC logic
+    always @(clk) begin
+        if ((~mdc) & mdc_prev) begin 
+            bit_cnt <= bit_cnt + 'd1;
+
+            if (state == READ) begin
+                down_data <= { down_data[DATA_WIDTH-1:1], mdio_i };
+            end
+        end
+    end
+
+    // Negedge MDC logic
+    always @(clk) begin
+        if (mdc & (~mdc_prev)) begin
+            mdio_o_r <= mdio_o_next;
+            mdio_t_r <= mdio_t_next;
+        end
+    end
 
 endmodule
