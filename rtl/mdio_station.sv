@@ -23,6 +23,7 @@ module mdio_station #(
     input   wire                        clk,
     input   wire                        rst,
     input   wire                        en,
+    output  wire                        busy,
     output  reg                         err,
 
     input   wire [PHY_ADDR_WIDTH-1:0]   phy_addr,
@@ -35,7 +36,7 @@ module mdio_station #(
     
     output  reg [DATA_WIDTH-1:0]        down_data,
     output  reg                         down_valid,
-    input   reg                         down_ready,
+    input   wire                        down_ready,
 
     // MDIO interface
     output  wire                        mdc,
@@ -60,7 +61,8 @@ module mdio_station #(
     reg [$clog2(ICLK_TO_MDC_FREQ_RATIO):0] mdc_cnt;
 
     always @(posedge clk) begin
-        if ( ( ~ce ) | 
+        if ( ( ~en ) |
+             ( ~ce ) | 
              (  rst ) ) begin
             mdc_cnt <= ICLK_TO_MDC_FREQ_RATIO / 2 + 'd1;
         end else if ( ce ) begin
@@ -112,9 +114,9 @@ module mdio_station #(
                     mdio_t_next = 'b0;
                     mdio_o_next = 'b1;
 
-                    next_state <= PREAMBLE;
+                    next_state = PREAMBLE;
                 end else begin
-                    next_state <= START;
+                    next_state = START;
                 end
             end
             START: begin
@@ -182,7 +184,7 @@ module mdio_station #(
                     mdio_t_next = 'b0;
                     mdio_o_next = 'b0;
 
-                    next_state <= REG_ADDR;
+                    next_state = REG_ADDR;
                 end
             end
             REG_ADDR: begin
@@ -266,6 +268,11 @@ module mdio_station #(
         else     state <= next_state;
     end
 
+    always_ff @(posedge clk) begin
+        if (state == IDLE && next_state == IDLE)    up_ready <= 'b1;
+        else                                        up_ready <= 'b0; 
+    end
+
     // Bit counter
     always @(clk) begin
         mdc_prev <= mdc;
@@ -273,7 +280,7 @@ module mdio_station #(
 
     always_ff @(posedge clk) begin
         if (rst | (| (state ^ next_state))) bit_cnt <= 'd0;
-        else if (mdc & (~mdc_prev)) bit_cnt <= bit_cnt + 'd1;
+        else if (mdc & (~mdc_prev))         bit_cnt <= bit_cnt + 'd1;
     end
 
     // Latching incoming values
@@ -289,13 +296,11 @@ module mdio_station #(
     // Posedge MDC logic
     always @(posedge clk) begin
         if (rst) begin
-            down_data <= 'd0;
-            down_valid <= 'd0;
-        end else if ((~mdc) & mdc_prev) begin 
-            if (state == READ) begin
-                down_data <= { down_data[DATA_WIDTH-1:1], mdio_i };
-                down_valid <= (bit_cnt == DATA_WIDTH) ? 'b1 : 'b0;
-            end
+            down_data   <= 'd0;
+            down_valid  <= 'd0;
+        end else if ((~mdc) & mdc_prev && (state == READ)) begin 
+            down_data   <= { down_data[DATA_WIDTH-1:1], mdio_i };
+            down_valid  <= (bit_cnt == DATA_WIDTH) ? 'b1 : 'b0;
         end
     end
 
@@ -312,5 +317,6 @@ module mdio_station #(
 
     assign mdio_o = mdio_o_r;
     assign mdio_t = mdio_t_r;
+    assign busy   = (state != IDLE);
 
 endmodule
